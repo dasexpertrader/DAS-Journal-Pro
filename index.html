@@ -42,14 +42,18 @@ th{text-align:left;color:var(--mu);font-weight:600;font-size:12px;padding:8px;bo
 <form id="login" class="card" hidden>
   <h1>Journal de Trading Pro<small>Connexion à votre espace sécurisé</small></h1>
   <input id="em" type="email" placeholder="E-mail" autocomplete="username" required aria-label="E-mail">
-  <input id="pw" type="password" placeholder="Mot de passe" autocomplete="current-password" required aria-label="Mot de passe">
-  <button class="pri" style="padding:10px">Se connecter</button><div id="lerr" class="r d"></div>
+  <input id="pw" type="password" placeholder="Mot de passe" autocomplete="current-password" minlength="8" required aria-label="Mot de passe">
+  <button class="pri" style="padding:10px">Se connecter</button>
+  <button type="button" id="bSign" style="padding:10px">Créer un compte</button>
+  <button type="button" id="bReset" class="d" style="border:0;background:none">Mot de passe oublié ?</button>
+  <div id="lerr" class="r d" role="alert"></div>
+  <p class="d">Chaque trader a son propre espace privé : vos données ne sont visibles que par vous.</p>
 </form>
 
 <div id="app" hidden>
 <header>
   <h1>Journal de Trading Pro<small>Suivi des comptes en direct</small></h1>
-  <div class="bar"><div id="tabs" class="bar"></div><button id="bLegacy">Importer l’ancien journal</button><button id="bCsv">Exporter CSV</button><button id="bOut">Déconnexion</button></div>
+  <div class="bar"><div id="tabs" class="bar"></div><span id="who" class="d"></span><button id="bCsv">Exporter CSV</button><button id="bOut">Déconnexion</button></div>
 </header>
 <main>
   <section class="grid k">
@@ -96,7 +100,7 @@ th{text-align:left;color:var(--mu);font-weight:600;font-size:12px;padding:8px;bo
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
 import { getFirestore, collection, doc, onSnapshot, setDoc, getDoc, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
 const app = initializeApp({ apiKey:"AIzaSyDFfsaI85dsAfAqigH0HyKgcGzNuTDQGG8", authDomain:"trading-das.firebaseapp.com", projectId:"trading-das",
@@ -111,17 +115,32 @@ const A = {}, T = {}, N = {}, U = {}; let cur = 'ALL', started = false, raf = 0;
 const render = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(draw); };
 
 // ---------- Authentification ----------
-$('login').onsubmit = async e => { e.preventDefault(); try { await signInWithEmailAndPassword(auth, $('em').value, $('pw').value); } catch (_) { $('lerr').textContent = 'Identifiants incorrects.'; } };
+const msg = c => ({ 'auth/invalid-credential':'Identifiants incorrects.', 'auth/wrong-password':'Identifiants incorrects.', 'auth/user-not-found':'Identifiants incorrects.',
+  'auth/email-already-in-use':'Un compte existe déjà avec cet e-mail.', 'auth/weak-password':'Mot de passe trop court (8 caractères minimum).',
+  'auth/invalid-email':'Adresse e-mail invalide.', 'auth/too-many-requests':'Trop de tentatives, réessayez plus tard.' }[c] || 'Opération impossible, réessayez.');
+const cred = () => { const e = $('em').value.trim(), p = $('pw').value; if (!e || p.length < 8) { $('lerr').textContent = 'E-mail et mot de passe (8 caractères minimum) requis.'; return null; } return [e, p]; };
+$('login').onsubmit = async e => { e.preventDefault(); const c = cred(); if (!c) return; try { await signInWithEmailAndPassword(auth, ...c); } catch (x) { $('lerr').textContent = msg(x.code); } };
+$('bSign').onclick = async () => { const c = cred(); if (!c) return; try { await createUserWithEmailAndPassword(auth, ...c); } catch (x) { $('lerr').textContent = msg(x.code); } };
+$('bReset').onclick = async () => { const e = $('em').value.trim(); if (!e) { $('lerr').textContent = 'Saisissez votre e-mail d’abord.'; return; } try { await sendPasswordResetEmail(auth, e); } catch (_) {} $('lerr').textContent = 'Si un compte existe, un e-mail de réinitialisation a été envoyé.'; };
 $('bOut').onclick = () => signOut(auth);
-onAuthStateChanged(auth, u => { $('login').hidden = !!u; $('app').hidden = !u; if (u) start(); });
+let uid = null; const P = (...p) => ['users', uid, ...p];
+onAuthStateChanged(auth, u => {
+  $('login').hidden = !!u; $('app').hidden = !u;
+  if (u) { uid = u.uid; $('who').textContent = u.email; $('pw').value = ''; start(); } else stop();
+});
 
 function norm(id, acct, t) {
   return { id, acct, date: t.date || '', ts: Number(t.closeTime) || 0, asset: t.asset || '', type: t.type === 'SELL' ? 'SELL' : 'BUY', lot: Number(t.lotSize) || 0,
     pnl: Number(t.pnl) || 0, rr: t.rr == null ? null : Number(t.rr), plan: t.followedPlan || '', emo: t.emotion || '', setup: t.setup || '', notes: t.notes || '' };
 }
+let unsubAcc = null;
+function stop() {
+  if (unsubAcc) unsubAcc(); unsubAcc = null; Object.values(U).forEach(a => a.forEach(f => f())); [A, T, N, U].forEach(o => Object.keys(o).forEach(k => delete o[k]));
+  started = false; uid = null; cur = 'ALL'; $('tTr').innerHTML = ''; $('tPos').innerHTML = ''; $('tabs').innerHTML = '';
+}
 function start() {
   if (started) return; started = true;
-  onSnapshot(collection(db, 'accounts'), s => {
+  unsubAcc = onSnapshot(collection(db, ...P('accounts')), s => {
     Object.keys(A).forEach(k => delete A[k]);
     s.forEach(d => { A[d.id] = { id:d.id, ...d.data() }; attach(d.id); });
     render();
@@ -130,8 +149,8 @@ function start() {
 function attach(id) {
   if (U[id]) return;
   U[id] = [
-    onSnapshot(collection(db, 'accounts', id, 'trades'), s => { T[id] = s.docs.map(d => norm(d.id, id, d.data())); render(); }),
-    onSnapshot(query(collection(db, 'accounts', id, 'snapshots'), orderBy('t', 'desc'), limit(600)), s => { N[id] = s.docs.map(d => d.data()).reverse(); render(); })
+    onSnapshot(collection(db, ...P('accounts', id, 'trades')), s => { T[id] = s.docs.map(d => norm(d.id, id, d.data())); render(); }),
+    onSnapshot(query(collection(db, ...P('accounts', id, 'snapshots')), orderBy('t', 'desc'), limit(600)), s => { N[id] = s.docs.map(d => d.data()).reverse(); render(); })
   ];
 }
 setInterval(render, 30000);
@@ -217,7 +236,7 @@ function draw() {
     <td><select data-f="followedPlan">${opt(t.plan, ['', 'Oui', 'Non'])}</select></td>
     <td><select data-f="emotion">${opt(t.emo, ['', 'Calme', 'Impatient', 'FOMO', 'Revenge', 'Stressé'])}</select></td>
     <td><input data-f="notes" value="${esc(t.notes)}" placeholder="Notes"></td></tr>`).join('')
-    : '<tr><td colspan="11" class="empty">Aucun trade. Les trades clôturés arrivent automatiquement depuis l’EA.</td></tr>';
+    : '<tr><td colspan="11" class="empty">Aucun trade. Les trades clôturés arrivent automatiquement depuis votre EA une fois votre compte relié.</td></tr>';
 }
 const online = a => a && (Date.now() / 1000 - (+a.updatedAt || 0)) < 150;
 const ago = a => { const s = Date.now() / 1000 - (+a.updatedAt || 0); return !a.updatedAt ? 'jamais' : s < 3600 ? Math.round(s / 60) + ' min' : s < 86400 ? Math.round(s / 3600) + ' h' : Math.round(s / 86400) + ' j'; };
@@ -242,11 +261,11 @@ function rules(single, start, eq, bal) {
 
 // ---------- Actions ----------
 $('tabs').onclick = e => { const b = e.target.closest('button'); if (b) { cur = b.dataset.t; render(); } };
-const saveRule = (id, field) => $(id).onchange = () => setDoc(doc(db, 'accounts', cur), { [field]: parseFloat($(id).value) || 0 }, { merge:true });
+const saveRule = (id, field) => $(id).onchange = () => setDoc(doc(db, ...P('accounts', cur)), { [field]: parseFloat($(id).value) || 0 }, { merge:true });
 saveRule('rStart', 'startBalance'); saveRule('rDay', 'dailyPct'); saveRule('rDd', 'ddPct'); saveRule('rTg', 'targetPct');
 $('tTr').onchange = e => {
   const f = e.target.dataset.f, tr = e.target.closest('tr'); if (!f || !tr) return;
-  setDoc(doc(db, 'accounts', tr.dataset.a, 'trades', tr.dataset.i), { [f]: e.target.value }, { merge:true });
+  setDoc(doc(db, ...P('accounts', tr.dataset.a, 'trades', tr.dataset.i)), { [f]: e.target.value }, { merge:true });
 };
 $('bCsv').onclick = () => {
   const ids = cur === 'ALL' ? Object.keys(A) : [cur], rows = ids.flatMap(i => T[i] || []).sort((a, b) => a.ts - b.ts);
@@ -254,16 +273,6 @@ $('bCsv').onclick = () => {
   const csv = '\ufeff' + 'Date,Compte,Actif,Sens,Lots,Resultat,RR,Setup,PlanRespecte,Emotion,Notes\n' +
     rows.map(t => [t.date, (A[t.acct] || {}).name || t.acct, t.asset, t.type, t.lot, t.pnl, t.rr ?? '', t.setup, t.plan, t.emo, t.notes].map(c).join(',')).join('\n');
   const l = document.createElement('a'); l.href = URL.createObjectURL(new Blob([csv], { type:'text/csv;charset=utf-8' })); l.download = 'journal_' + new Date().toISOString().slice(0, 10) + '.csv'; l.click();
-};
-$('bLegacy').onclick = async () => {
-  const s = await getDoc(doc(db, 'journals', 'user_default_journal'));
-  if (!s.exists() || !(s.data().trades || []).length) return alert('Aucun ancien journal trouvé.');
-  const d = s.data(), tr = d.trades;
-  if (!confirm(`Importer ${tr.length} trade(s) dans un compte « Journal manuel » ?`)) return;
-  await Promise.all(tr.map((t, i) => setDoc(doc(db, 'accounts', 'manuel', 'trades', 'old' + i),
-    { date:t.date || '', asset:t.asset || '', type:t.type || 'BUY', lotSize:t.lotSize || 0, pnl:t.pnl || 0, rr:t.rr ?? null, followedPlan:t.followedPlan || '', emotion:t.emotion || '', notes:t.notes || '', closeTime:Date.parse(t.date) / 1000 || 0, source:'import' }, { merge:true })));
-  const b = (d.initialBalance || 0) + tr.reduce((x, t) => x + (t.pnl || 0), 0);
-  await setDoc(doc(db, 'accounts', 'manuel'), { name:'Journal manuel (ancien)', platform:'Manuel', balance:b, equity:b, startBalance:d.initialBalance || 0, updatedAt:0 }, { merge:true });
 };
 </script>
 </body>
