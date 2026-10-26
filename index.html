@@ -53,9 +53,23 @@ th{text-align:left;color:var(--mu);font-weight:600;font-size:12px;padding:8px;bo
 <div id="app" hidden>
 <header>
   <h1>Journal de Trading Pro<small>Suivi des comptes en direct</small></h1>
-  <div class="bar"><div id="tabs" class="bar"></div><span id="who" class="d"></span><button id="bCsv">Exporter CSV</button><button id="bOut">Déconnexion</button></div>
+  <div class="bar"><div id="tabs" class="bar"></div><span id="who" class="d"></span><button id="bLink" class="pri">+ Connecter un compte</button><button id="bCsv">Exporter CSV</button><button id="bOut">Déconnexion</button></div>
 </header>
 <main>
+  <section class="card" id="link" hidden>
+    <h2>Connecter un compte MT4 / MT5</h2>
+    <form id="lnk" class="grid k" style="margin-bottom:10px">
+      <div><div class="l">Nom du compte</div><input id="lName" placeholder="ex : FTMO 100K" maxlength="40"></div>
+      <div><div class="l">Plateforme</div><select id="lPlat"><option value="mt5">MetaTrader 5</option><option value="mt4">MetaTrader 4</option></select></div>
+      <div><div class="l">Login</div><input id="lLogin" inputmode="numeric" required></div>
+      <div><div class="l">Serveur du broker</div><input id="lServer" placeholder="ex : FTMO-Server" required></div>
+      <div><div class="l">Mot de passe investisseur</div><input id="lPass" type="password" autocomplete="off" required></div>
+      <div style="align-self:end"><button class="pri" style="width:100%;padding:9px">Connecter</button></div>
+    </form>
+    <p class="d">Utilisez uniquement le mot de passe <b>investisseur</b> (lecture seule), jamais le mot de passe principal. Les données se synchronisent toutes les minutes tant que le journal est ouvert.</p>
+    <div id="lstat" class="o d" role="status" style="margin:6px 0"></div>
+    <div id="llist" class="grid" style="margin-top:8px"></div>
+  </section>
   <section class="grid k">
     <div class="card"><div class="l">Solde</div><div class="v" id="kBal">—</div><div class="d" id="kSt">—</div></div>
     <div class="card"><div class="l">Équité</div><div class="v" id="kEq">—</div><div class="d" id="kFl">—</div></div>
@@ -101,7 +115,7 @@ th{text-align:left;color:var(--mu);font-weight:600;font-size:12px;padding:8px;bo
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
 import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-import { getFirestore, collection, doc, onSnapshot, setDoc, getDoc, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+import { getFirestore, collection, doc, onSnapshot, setDoc, getDoc, query, orderBy, limit, writeBatch, deleteField } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
 const app = initializeApp({ apiKey:"AIzaSyDFfsaI85dsAfAqigH0HyKgcGzNuTDQGG8", authDomain:"trading-das.firebaseapp.com", projectId:"trading-das",
   storageBucket:"trading-das.firebasestorage.app", messagingSenderId:"1034073455746", appId:"1:1034073455746:web:43363d623668164984089b" });
@@ -135,7 +149,7 @@ function norm(id, acct, t) {
 }
 let unsubAcc = null;
 function stop() {
-  if (unsubAcc) unsubAcc(); unsubAcc = null; Object.values(U).forEach(a => a.forEach(f => f())); [A, T, N, U].forEach(o => Object.keys(o).forEach(k => delete o[k]));
+  if (unsubAcc) unsubAcc(); unsubAcc = null; Object.values(U).forEach(a => a.forEach(f => f())); [A, T, N, U, S].forEach(o => Object.keys(o).forEach(k => delete o[k]));
   started = false; uid = null; cur = 'ALL'; $('tTr').innerHTML = ''; $('tPos').innerHTML = ''; $('tabs').innerHTML = '';
 }
 function start() {
@@ -143,7 +157,7 @@ function start() {
   unsubAcc = onSnapshot(collection(db, ...P('accounts')), s => {
     Object.keys(A).forEach(k => delete A[k]);
     s.forEach(d => { A[d.id] = { id:d.id, ...d.data() }; attach(d.id); });
-    render();
+    render(); setTimeout(sync, 3000);
   });
 }
 function attach(id) {
@@ -154,6 +168,64 @@ function attach(id) {
   ];
 }
 setInterval(render, 30000);
+
+// ---------- Connexion directe MT4/MT5 (via Worker Cloudflare + MetaApi) ----------
+const WORKER = 'https://journal-metaapi.aksantisaidiadan.workers.dev', S = {};
+async function wk(path, opt = {}) {
+  const tk = await auth.currentUser.getIdToken();
+  const r = await fetch(WORKER + path, { ...opt, headers:{ Authorization:'Bearer ' + tk, 'Content-Type':'application/json' } });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'Erreur ' + r.status);
+  return j;
+}
+$('bLink').onclick = () => { $('link').hidden = !$('link').hidden; };
+$('lnk').onsubmit = async e => {
+  e.preventDefault(); const st = $('lstat'), login = $('lLogin').value.trim(), name = $('lName').value.trim() || login;
+  const server = $('lServer').value.trim(), platform = $('lPlat').value;
+  st.textContent = 'Connexion en cours…';
+  try {
+    const r = await wk('/connect', { method:'POST', body:JSON.stringify({ name, login, server, platform, password:$('lPass').value }) });
+    await setDoc(doc(db, ...P('accounts', 'mt' + login.replace(/\W/g, ''))), { name, login, server, platform, metaId:r.accountId, balance:0, equity:0, updatedAt:0, positions:'[]' }, { merge:true });
+    $('lPass').value = ''; st.textContent = 'Compte ajouté. La première synchronisation peut prendre 1 à 2 minutes.';
+    setTimeout(sync, 2000);
+  } catch (x) { st.textContent = x.message; }
+};
+function renderLinks() {
+  const l = Object.values(A).filter(a => a.metaId);
+  $('llist').innerHTML = l.map(a => `<div class="row"><b>${esc(a.name || a.id)}</b><span>${esc(S[a.id] || 'En attente de synchronisation')}</span><button data-u="${esc(a.id)}">Déconnecter</button></div>`).join('');
+}
+$('llist').onclick = async e => {
+  const b = e.target.closest('button'), a = b && A[b.dataset.u]; if (!a || !confirm('Déconnecter ce compte ? L’historique déjà enregistré est conservé.')) return;
+  try { await wk('/account?accountId=' + encodeURIComponent(a.metaId), { method:'DELETE' }); await setDoc(doc(db, ...P('accounts', a.id)), { metaId:deleteField() }, { merge:true }); }
+  catch (x) { $('lstat').textContent = x.message; }
+};
+let syncing = false;
+async function sync() {
+  if (syncing || !uid || document.hidden) return; syncing = true;
+  try {
+    for (const a of Object.values(A).filter(x => x.metaId)) {
+      try {
+        const d = await wk('/sync?accountId=' + encodeURIComponent(a.metaId)), i = d.info || {};
+        if (!d.ready || i.balance == null) { S[a.id] = 'Connexion au broker… ' + (d.status || ''); continue; }
+        const t = Math.floor(Date.now() / 1000);
+        const pos = (d.positions || []).map(p => ({ s:p.symbol, t:p.type === 'POSITION_TYPE_SELL' ? 'SELL' : 'BUY', v:p.volume, o:p.openPrice, p:+((p.profit || 0) + (p.swap || 0) + (p.commission || 0)).toFixed(2) }));
+        await setDoc(doc(db, ...P('accounts', a.id)), { balance:i.balance, equity:i.equity, positions:JSON.stringify(pos), updatedAt:t }, { merge:true });
+        await setDoc(doc(db, ...P('accounts', a.id, 'snapshots', String(t))), { t, balance:i.balance, equity:i.equity });
+        const known = new Set((T[a.id] || []).map(x => x.id));
+        const fresh = (d.deals || []).filter(x => (x.type === 'DEAL_TYPE_BUY' || x.type === 'DEAL_TYPE_SELL') && x.entryType !== 'DEAL_ENTRY_IN' && !known.has(String(x.id)));
+        for (let k = 0; k < fresh.length; k += 400) {
+          const wb = writeBatch(db);
+          fresh.slice(k, k + 400).forEach(x => wb.set(doc(db, ...P('accounts', a.id, 'trades', String(x.id))), {
+            date:String(x.time).slice(0, 10), closeTime:Math.floor(Date.parse(x.time) / 1000), asset:x.symbol || '', type:x.type === 'DEAL_TYPE_SELL' ? 'BUY' : 'SELL',
+            lotSize:x.volume || 0, pnl:+((x.profit || 0) + (x.swap || 0) + (x.commission || 0)).toFixed(2), source:'metaapi' }, { merge:true }));
+          await wb.commit();
+        }
+        S[a.id] = 'Synchronisé à ' + new Date().toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' });
+      } catch (x) { S[a.id] = 'Erreur : ' + x.message; }
+    }
+  } finally { syncing = false; render(); }
+}
+setInterval(sync, 60000);
 
 // ---------- Calculs ----------
 function analyse(list, start) {
@@ -181,6 +253,7 @@ const barSet = obj => { const k = Object.keys(obj).sort(), v = k.map(x => +obj[x
 
 // ---------- Affichage ----------
 function draw() {
+  renderLinks();
   const all = Object.keys(A).sort();
   $('tabs').innerHTML = ['ALL', ...all].map(id => {
     const a = A[id], on = id === 'ALL' ? all.some(i => online(A[i])) : online(a);
